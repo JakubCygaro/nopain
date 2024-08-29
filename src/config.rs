@@ -18,5 +18,5 @@ pub struct Package {
     pub compiler: String,
     pub java: String,
     pub main: Option<String>,
-    pub jar: String
+    pub jar: String,
 }

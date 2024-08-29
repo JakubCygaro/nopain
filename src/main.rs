@@ -74,17 +74,21 @@ fn build(cfg: Option<ConfigFile>, jar: bool) -> Result<()> {
     output.arg(r#".:lib"#);
     output.arg("-d");
     output.arg("bin");
-
-    for (index, src) in sources.iter().enumerate() {
-        if index == sources.len() - 1 {
-            output.arg(format!("{}", src.path().to_str().unwrap()));
-        } else {
-            output.arg(format!("{};", src.path().to_str().unwrap()));
-        }
+    let sources = sources.into_iter().map(|d| d.path()).collect::<Vec<_>>();
+    for (_index, src) in sources.iter().enumerate() {
+        output.arg(format!("{}", src.to_str().unwrap()));
     }
     let _output = output.output()?;
     if jar {
-        jar_package(&cfg)?;
+        let sources = sources
+            .into_iter()
+            .map(|mut p| {
+                p.set_extension("class");
+                p.strip_prefix(&src_dir).unwrap().to_owned()
+            })
+            .collect::<Vec<PathBuf>>();
+        jar_package(&cfg, &sources)?;
+        jar_package(&cfg, &sources)?;
     }
     Ok(())
 }
@@ -109,7 +113,7 @@ fn get_sources(path: &PathBuf, ext: &str) -> Result<Vec<DirEntry>> {
     Ok(ret)
 }
 
-fn jar_package(cfg: &ConfigFile) -> Result<()> {
+fn jar_package(cfg: &ConfigFile, sources: &Vec<PathBuf>) -> Result<()> {
     let package = cfg.package.name.as_str();
     use std::process::Command;
     let mut output = Command::new(&cfg.package.jar);
@@ -117,19 +121,29 @@ fn jar_package(cfg: &ConfigFile) -> Result<()> {
     current_dir.push("bin");
     output.current_dir(current_dir);
     let target = format!("../target/{}.jar", package);
+
     if let Some(main) = &cfg.package.main {
         output.arg("cfe");
         output.arg(target);
         output.arg(main.as_str());
 
-        let mut main_path = String::from("");
-        main_path.push_str(main.as_str());
-        let mut main_path = main_path.replace("/", ".");
-        main_path.push_str(".class");
-        output.arg(main_path);
+        for src in sources {
+            output.arg(src);
+        }
+
+
+        // let mut main_path = String::from("");
+        // main_path.push_str(main.as_str());
+        // let mut main_path = main_path.replace(".", "/");
+        // main_path.push_str(".class");
+        // output.arg(main_path);
     } else {
         output.arg("cf");
         output.arg(target);
+
+        for src in sources {
+            output.arg(src);
+        }
     }
     let out = output.output()?;
     std::io::stdout().write_all(&out.stdout)?;
@@ -147,19 +161,29 @@ fn run(jar: bool) -> Result<()> {
     build(Some(cfg.clone()), jar)?;
     use std::process::Command;
     let mut output = Command::new(&cfg.package.java);
-    
+
     output.arg("-classpath");
     #[cfg(target_os = "windows")]
     output.arg(r#"lib;bin"#);
     #[cfg(target_os = "linux")]
     output.arg(r#"lib:bin"#);
-    if jar{
-        jar_package(&cfg)?;
+
+    if jar {
+        let wd = std::env::current_dir()?;
+        let mut bin = wd.clone();
+        bin.push("bin");
+        let sources = get_sources(&bin, "class")?
+            .into_iter()
+            .map(|d| d.path())
+            .map(|p| {
+                p.strip_prefix(&bin).unwrap().to_owned()
+            })
+            .collect::<Vec<PathBuf>>();
+        jar_package(&cfg, &sources)?;
         output.arg("-jar");
-        // let mut wd = std::env::current_dir()?;
-        // wd.push("target");
         output.arg(&format!("target/{}.jar", cfg.package.name));
     }
+    
     output.arg(main.as_str());
 
     let _output = output.output()?;
