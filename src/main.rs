@@ -1,14 +1,13 @@
 mod config;
+mod maintenance;
+mod erros;
 
-use core::fmt;
-use std::{fs::DirEntry, io::Write, ops::RangeToInclusive, os::windows::process::CommandExt, path::PathBuf};
+use erros::{ImportValidationError, BuildError, InitError};
+use std::{io::Write, path::PathBuf};
 use clap::{command, Parser, Subcommand};
-use config::{ConfigFile, Package};
+use config::ConfigFile;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-
-
-
 
 #[derive(Parser)]
 #[command(version, about = "A mini build system for Java", long_about = None)]
@@ -56,30 +55,35 @@ fn main() {
     };
 }
 
-fn get_config() -> Result<config::ConfigFile> {
-    use std::fs;
-    let file = fs::read_to_string("./Nopain.toml")?;
-    match toml::from_str(&file) {
-        Ok(c) => Ok(c),
-        Err(e) => Err(Box::new(e)),
-    }
-}
+
 
 fn build(jar: bool) -> Result<PostBuildData> {
     use std::process::Command;
 
-    let cfg = get_config()?;
+    let cfg = maintenance::get_config()?;
+    let lockfile = maintenance::get_lock_file()?;
     let mut output = Command::new(&cfg.package.compiler);
 
     let working_dir = std::env::current_dir()?;
     let mut src_dir = working_dir.clone();
-
-
+    
+    //gather external libs
+    let mut external_libs: Vec<PathBuf> = vec![];
+    if let Some(import) = &cfg.import {
+        for ext_lib in import {
+            let path = PathBuf::from(&ext_lib.path);
+            let path = path.canonicalize()?;
+            if path.extension().unwrap_or_default() != "jar" {
+                return Err(Box::new(ImportValidationError{path: path}))
+            }
+            external_libs.push(path);
+        }
+    }
 
     //gather libs
     let mut lib_dir = working_dir.clone();
     lib_dir.push("lib");
-    let libs = get_sources(&lib_dir, "jar")?
+    let libs = maintenance::get_sources(&lib_dir, "jar")?
         .into_iter()
         .map(|d| d.path())
         .map(|p| p.strip_prefix(&lib_dir).unwrap().to_owned())
@@ -94,8 +98,15 @@ fn build(jar: bool) -> Result<PostBuildData> {
         #[cfg(target_os = "linux")]
         libs_arg.push_str(&format!("lib/{}:", lib.to_str().unwrap()));
     }
-    output.arg(&libs_arg);
+    for ext_lib in &external_libs {
+        #[cfg(target_os = "windows")]
+        libs_arg.push_str(&format!("{};", ext_lib.to_str().unwrap()));
+        #[cfg(target_os = "linux")]
+        libs_arg.push_str(&format!("{}:", ext_lib.to_str().unwrap()));
+    }
 
+    //println!("lib_arg: {}", &libs_arg);
+    output.arg(&libs_arg);
     //pass -d flag
     output.arg("-d");
     output.arg("bin");
@@ -103,13 +114,25 @@ fn build(jar: bool) -> Result<PostBuildData> {
 
     //gather sources
     src_dir.push("src");
-    let sources = get_sources(&src_dir, "java")?;
+    let sources = maintenance::get_sources(&src_dir, "java")?;
     let sources = sources.into_iter()
         .map(|d| d.path())
         .collect::<Vec<_>>();
 
-    //pass sources
+    //pass recently modified sources
     for (_index, src) in sources.iter()
+        .filter(|d| {
+            let Some(last_build) = &lockfile.last_build else {
+                return true;
+            };
+            match d.metadata() {
+                Err(_) => false,
+                Ok(m) => {
+                    let m = m.modified().unwrap();
+                    m.ge(last_build)
+                }
+            }
+        })
         .enumerate() {
         output.arg(format!("{}", src.to_str().unwrap()));
     }
@@ -117,7 +140,7 @@ fn build(jar: bool) -> Result<PostBuildData> {
     let _output = output.output()?;
 
     //gather class files
-    let sources = sources
+    let classes = sources
         .into_iter()
         .map(|mut p| {
             p.set_extension("class");
@@ -129,11 +152,12 @@ fn build(jar: bool) -> Result<PostBuildData> {
     let post_build = PostBuildData {
         cfg: cfg,
         libs: libs,
-        classes: sources,
+        classes,
         src_dir: src_dir,
         lib_dir: lib_dir,
         libs_arg: libs_arg,
-        bin_dir: bin_dir
+        bin_dir: bin_dir,
+        external_libs: external_libs
     };
     if jar {
         jar_package(&post_build.cfg, &post_build)?;
@@ -144,25 +168,7 @@ fn build(jar: bool) -> Result<PostBuildData> {
     Ok(post_build)
 }
 
-fn get_sources(path: &PathBuf, ext: &str) -> Result<Vec<DirEntry>> {
-    use std::fs;
-    let mut ret: Vec<DirEntry> = vec![];
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            let mut inner = get_sources(&path, ext)?;
-            ret.append(&mut inner);
-            continue;
-        }
-        if let Some(ext) = path.extension() {
-            if ext.eq(ext) {
-                ret.push(entry);
-            }
-        }
-    }
-    Ok(ret)
-}
+
 
 fn jar_package(cfg: &ConfigFile, post_build: &PostBuildData) -> Result<()> {
     use std::process::Command;
@@ -182,11 +188,12 @@ fn jar_package(cfg: &ConfigFile, post_build: &PostBuildData) -> Result<()> {
 
     output.arg("cfm");
     output.arg(target);
-    let manifest_path = generate_manifest(cfg, &post_build.libs)?;
+    let manifest_path = generate_manifest(cfg, &post_build.libs, &post_build.external_libs)?;
     output.arg(manifest_path);
     output.arg("-C");
     output.arg("bin");
     output.arg(".");
+
     let out = output.output()?;
 
     build_dir.push("lib");
@@ -200,7 +207,14 @@ fn jar_package(cfg: &ConfigFile, post_build: &PostBuildData) -> Result<()> {
             post_build.lib_dir.join(l).to_owned()
         })
     {
-        fs::copy(&lib, build_lib_dir.join(lib.file_name().unwrap()))?;
+        let dest = build_lib_dir.join(lib.file_name().unwrap());
+        fs::copy(&lib, dest)?;
+    }
+
+    for ext in post_build.external_libs.iter()
+    {
+        let dest = build_lib_dir.join(ext.file_name().unwrap());
+        fs::copy(&ext, dest)?;
     }
     
 
@@ -222,11 +236,11 @@ fn run(jar: bool) -> Result<()> {
     
     let mut output = Command::new(&cfg.package.java);
 
-    let class_files = build_data.classes.into_iter()
-        .map(|p |{
-            build_data.bin_dir.join(p)
-        })
-        .collect::<Vec<_>>();
+    // let class_files = build_data.classes.into_iter()
+    //     .map(|p |{
+    //         build_data.bin_dir.join(p)
+    //     })
+    //     .collect::<Vec<_>>();
 
     // pass -cp flag
     output.arg("-classpath");
@@ -248,18 +262,7 @@ fn run(jar: bool) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct InitError {
-    msg: String,
-}
 
-impl std::error::Error for InitError {}
-
-impl fmt::Display for InitError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", &self.msg)
-    }
-}
 
 fn init(name: String) -> Result<()> {
     use std::fs;
@@ -323,19 +326,25 @@ public class Main{
     Ok(())
 }
 
-#[derive(Debug)]
-struct BuildError {
-    msg: String,
-}
-
-impl std::error::Error for BuildError {}
-
-impl fmt::Display for BuildError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.msg)
+fn generate_manifest(cfg: &ConfigFile, libs: &Vec<PathBuf>, external_libs: &Vec<PathBuf>) -> Result<PathBuf>{
+    use std::fs;
+    let path = PathBuf::from("target/Manifest.txt");
+    let mut manifest = fs::File::create(&path)?;
+    
+    write!(manifest, "Manifest-Version: 1.0\n")?;
+    if let Some(entry) = &cfg.package.main {
+        write!(manifest, "Main-Class: {}\n", entry)?;
     }
+    write!(manifest, "Class-Path: ")?;
+    for lib in libs {
+        write!(manifest, "lib/{} ", lib.to_str().unwrap())?;
+    }
+    for ext in external_libs {
+        write!(manifest, "lib/{} ", ext.file_name().unwrap().to_str().unwrap())?;
+    }
+    write!(manifest, "\n\n")?;
+    Ok(path)
 }
-
 struct PostBuildData {
     /// all .jar file paths used for compilation
     pub libs: Vec<PathBuf>,
@@ -346,22 +355,8 @@ struct PostBuildData {
     pub classes: Vec<PathBuf>,
     pub bin_dir: PathBuf,
     pub src_dir: PathBuf,
-    pub lib_dir: PathBuf
+    pub lib_dir: PathBuf,
+    pub external_libs: Vec<PathBuf>
 }
 
-fn generate_manifest(cfg: &ConfigFile, libs: &Vec<PathBuf>) -> Result<PathBuf>{
-    use std::fs;
-    let path = PathBuf::from("target/Manifest.txt");
-    let mut manifest = fs::File::create(&path)?;
 
-    write!(manifest, "Manifest-Version: 1.0\n")?;
-    if let Some(entry) = &cfg.package.main {
-        write!(manifest, "Main-Class: {}\n", entry)?;
-    }
-    write!(manifest, "Class-Path: ")?;
-    for lib in libs {
-        write!(manifest, "lib/{} ", lib.to_str().unwrap())?;
-    }
-    write!(manifest, "\n\n")?;
-    Ok(path)
-}

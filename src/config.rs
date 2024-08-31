@@ -20,3 +20,10 @@ pub struct Package {
     pub main: Option<String>,
     pub jar: String,
 }
+
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct NopainLock {
+    pub last_build: Option<std::time::SystemTime>,
+}
+
