@@ -1,12 +1,14 @@
 mod config;
 
 use core::fmt;
-use std::{fs::DirEntry, io::Write, os::windows::process::CommandExt, path::PathBuf};
-
+use std::{fs::DirEntry, io::Write, ops::RangeToInclusive, os::windows::process::CommandExt, path::PathBuf};
 use clap::{command, Parser, Subcommand};
 use config::{ConfigFile, Package};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+
+
 
 #[derive(Parser)]
 #[command(version, about = "A mini build system for Java", long_about = None)]
@@ -32,16 +34,26 @@ enum Target {
 
 fn main() {
     let args = Args::parse();
-    let res = match args.target {
-        Target::Build { jar } => build(None, jar != 0),
-        Target::Run { jar } => run(jar != 0),
-        Target::Init { name } => init(name),
+    match args.target {
+        Target::Build { jar } => {
+            match build(jar != 0) {
+                Err(e) => eprintln!("Build error: {}", e),
+                Ok(_) => println!("Build done"),
+            }
+        },
+        Target::Run { jar } => {
+            match run(jar != 0) {
+                Err(e) => eprintln!("Run error: {}", e),
+                Ok(_) => (),
+            }
+        },
+        Target::Init { name } => {
+            match init(name) {
+                Err(e) => eprintln!("Init error: {}", e),
+                Ok(_) => println!("Initialized project directory"),
+            };
+        },
     };
-
-    match res {
-        Ok(()) => (),
-        Err(e) => eprintln!("An error occured during target execution: {}", e),
-    }
 }
 
 fn get_config() -> Result<config::ConfigFile> {
@@ -53,44 +65,83 @@ fn get_config() -> Result<config::ConfigFile> {
     }
 }
 
-fn build(cfg: Option<ConfigFile>, jar: bool) -> Result<()> {
-    let cfg = match cfg {
-        Some(c) => c,
-        None => get_config()?,
-    };
+fn build(jar: bool) -> Result<PostBuildData> {
+    use std::process::Command;
+
+    let cfg = get_config()?;
+    let mut output = Command::new(&cfg.package.compiler);
+
     let working_dir = std::env::current_dir()?;
     let mut src_dir = working_dir.clone();
-    src_dir.push("src");
 
-    let sources = get_sources(&src_dir, "java")?;
-    use std::process::Command;
-    // let mut sources_string = String::new();
 
-    let mut output = Command::new(&cfg.package.compiler);
+
+    //gather libs
+    let mut lib_dir = working_dir.clone();
+    lib_dir.push("lib");
+    let libs = get_sources(&lib_dir, "jar")?
+        .into_iter()
+        .map(|d| d.path())
+        .map(|p| p.strip_prefix(&lib_dir).unwrap().to_owned())
+        .collect::<Vec<_>>();
+
+    //pass libs as arg
     output.arg("-classpath");
-    #[cfg(target_os = "windows")]
-    output.arg(r#".;lib"#);
-    #[cfg(target_os = "linux")]
-    output.arg(r#".:lib"#);
+    let mut libs_arg = String::new();
+    for lib in &libs {
+        #[cfg(target_os = "windows")]
+        libs_arg.push_str(&format!("lib/{};", lib.to_str().unwrap()));
+        #[cfg(target_os = "linux")]
+        libs_arg.push_str(&format!("lib/{}:", lib.to_str().unwrap()));
+    }
+    output.arg(&libs_arg);
+
+    //pass -d flag
     output.arg("-d");
     output.arg("bin");
-    let sources = sources.into_iter().map(|d| d.path()).collect::<Vec<_>>();
-    for (_index, src) in sources.iter().enumerate() {
+
+
+    //gather sources
+    src_dir.push("src");
+    let sources = get_sources(&src_dir, "java")?;
+    let sources = sources.into_iter()
+        .map(|d| d.path())
+        .collect::<Vec<_>>();
+
+    //pass sources
+    for (_index, src) in sources.iter()
+        .enumerate() {
         output.arg(format!("{}", src.to_str().unwrap()));
     }
+    //run build
     let _output = output.output()?;
+
+    //gather class files
+    let sources = sources
+        .into_iter()
+        .map(|mut p| {
+            p.set_extension("class");
+            p.strip_prefix(&src_dir).unwrap().to_owned()
+        })
+        .collect::<Vec<PathBuf>>();
+    let mut bin_dir = working_dir.clone();
+    bin_dir.push("bin");
+    let post_build = PostBuildData {
+        cfg: cfg,
+        libs: libs,
+        classes: sources,
+        src_dir: src_dir,
+        lib_dir: lib_dir,
+        libs_arg: libs_arg,
+        bin_dir: bin_dir
+    };
     if jar {
-        let sources = sources
-            .into_iter()
-            .map(|mut p| {
-                p.set_extension("class");
-                p.strip_prefix(&src_dir).unwrap().to_owned()
-            })
-            .collect::<Vec<PathBuf>>();
-        jar_package(&cfg, &sources)?;
-        jar_package(&cfg, &sources)?;
+        jar_package(&post_build.cfg, &post_build)?;
     }
-    Ok(())
+
+    //make jar
+
+    Ok(post_build)
 }
 
 fn get_sources(path: &PathBuf, ext: &str) -> Result<Vec<DirEntry>> {
@@ -113,78 +164,81 @@ fn get_sources(path: &PathBuf, ext: &str) -> Result<Vec<DirEntry>> {
     Ok(ret)
 }
 
-fn jar_package(cfg: &ConfigFile, sources: &Vec<PathBuf>) -> Result<()> {
-    let package = cfg.package.name.as_str();
+fn jar_package(cfg: &ConfigFile, post_build: &PostBuildData) -> Result<()> {
     use std::process::Command;
+    use std::fs;
+
+    let package = cfg.package.name.as_str();
     let mut output = Command::new(&cfg.package.jar);
-    let mut current_dir = std::env::current_dir()?;
-    current_dir.push("bin");
-    output.current_dir(current_dir);
-    let target = format!("../target/{}.jar", package);
 
-    if let Some(main) = &cfg.package.main {
-        output.arg("cfe");
-        output.arg(target);
-        output.arg(main.as_str());
+    //set current dir to 'bin/'
+    let mut build_dir = std::env::current_dir()?;
+    build_dir.push("target");
+    build_dir.push("build");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .create(&build_dir)?;
+    let target = format!("target/build/{}.jar", package);
 
-        for src in sources {
-            output.arg(src);
-        }
-
-
-        // let mut main_path = String::from("");
-        // main_path.push_str(main.as_str());
-        // let mut main_path = main_path.replace(".", "/");
-        // main_path.push_str(".class");
-        // output.arg(main_path);
-    } else {
-        output.arg("cf");
-        output.arg(target);
-
-        for src in sources {
-            output.arg(src);
-        }
-    }
+    output.arg("cfm");
+    output.arg(target);
+    let manifest_path = generate_manifest(cfg, &post_build.libs)?;
+    output.arg(manifest_path);
+    output.arg("-C");
+    output.arg("bin");
+    output.arg(".");
     let out = output.output()?;
+
+    build_dir.push("lib");
+    let build_lib_dir = build_dir;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .create(&build_lib_dir)?;
+
+    for lib in post_build.libs.iter()
+        .map(|l| {
+            post_build.lib_dir.join(l).to_owned()
+        })
+    {
+        fs::copy(&lib, build_lib_dir.join(lib.file_name().unwrap()))?;
+    }
+    
+
     std::io::stdout().write_all(&out.stdout)?;
     std::io::stderr().write_all(&out.stderr)?;
     Ok(())
 }
 
 fn run(jar: bool) -> Result<()> {
-    let cfg = get_config()?;
+    use std::process::Command;
+
+    let build_data = build(jar)?;
+    let cfg = build_data.cfg;
     let Some(main) = &cfg.package.main else {
         return Err(Box::new(BuildError {
             msg: "This package contains no entry point class".to_owned(),
         }));
     };
-    build(Some(cfg.clone()), jar)?;
-    use std::process::Command;
+    
     let mut output = Command::new(&cfg.package.java);
 
+    let class_files = build_data.classes.into_iter()
+        .map(|p |{
+            build_data.bin_dir.join(p)
+        })
+        .collect::<Vec<_>>();
+
+    // pass -cp flag
     output.arg("-classpath");
-    #[cfg(target_os = "windows")]
-    output.arg(r#"lib;bin"#);
-    #[cfg(target_os = "linux")]
-    output.arg(r#"lib:bin"#);
+    output.arg(format!("bin;{}", &build_data.libs_arg));
 
     if jar {
-        let wd = std::env::current_dir()?;
-        let mut bin = wd.clone();
-        bin.push("bin");
-        let sources = get_sources(&bin, "class")?
-            .into_iter()
-            .map(|d| d.path())
-            .map(|p| {
-                p.strip_prefix(&bin).unwrap().to_owned()
-            })
-            .collect::<Vec<PathBuf>>();
-        jar_package(&cfg, &sources)?;
         output.arg("-jar");
-        output.arg(&format!("target/{}.jar", cfg.package.name));
+        output.arg(&format!("target/build/{}.jar", cfg.package.name));
+    } else {
+        output.arg(main.as_str());
     }
-    
-    output.arg(main.as_str());
+
 
     let _output = output.output()?;
 
@@ -280,4 +334,34 @@ impl fmt::Display for BuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.msg)
     }
+}
+
+struct PostBuildData {
+    /// all .jar file paths used for compilation
+    pub libs: Vec<PathBuf>,
+    /// the argument passed to -cp
+    pub libs_arg: String,
+    pub cfg: ConfigFile,
+    /// a collection of .class files created after compilation
+    pub classes: Vec<PathBuf>,
+    pub bin_dir: PathBuf,
+    pub src_dir: PathBuf,
+    pub lib_dir: PathBuf
+}
+
+fn generate_manifest(cfg: &ConfigFile, libs: &Vec<PathBuf>) -> Result<PathBuf>{
+    use std::fs;
+    let path = PathBuf::from("target/Manifest.txt");
+    let mut manifest = fs::File::create(&path)?;
+
+    write!(manifest, "Manifest-Version: 1.0\n")?;
+    if let Some(entry) = &cfg.package.main {
+        write!(manifest, "Main-Class: {}\n", entry)?;
+    }
+    write!(manifest, "Class-Path: ")?;
+    for lib in libs {
+        write!(manifest, "lib/{} ", lib.to_str().unwrap())?;
+    }
+    write!(manifest, "\n\n")?;
+    Ok(path)
 }
