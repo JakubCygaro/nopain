@@ -1,10 +1,11 @@
 mod config;
 mod erros;
 mod maintenance;
-
 use clap::{command, Parser, Subcommand};
+use colored::Colorize;
 use config::ConfigFile;
 use erros::{BuildError, ImportValidationError, InitError};
+use log::{debug, error, info, trace, warn, Level, LevelFilter};
 use std::collections::HashSet;
 use std::fs;
 use std::{io::Write, path::PathBuf};
@@ -13,6 +14,8 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 #[derive(Parser)]
 #[command(version, about = "A mini build system for Java", long_about = None)]
 struct Args {
+    #[arg(short, long, required = false, num_args = 0, default_value = None)]
+    verbose: bool,
     #[command(subcommand)]
     target: Target,
 }
@@ -34,19 +37,31 @@ enum Target {
 
 fn main() {
     let args = Args::parse();
+
+    env_logger::builder()
+        .format_timestamp(None)
+        .filter_level(
+            args.verbose
+                .then(|| LevelFilter::Trace)
+                .or(Some(LevelFilter::Info))
+                .unwrap(),
+        )
+        .format_module_path(false)
+        .init();
+
     match args.target {
         Target::Build { jar } => match build(jar != 0) {
-            Err(e) => eprintln!("Build error: {}", e),
-            Ok(_) => println!("Build done"),
+            Err(e) => error!("Build error: {}", e),
+            Ok(_) => info!("Build done"),
         },
         Target::Run { jar } => match run(jar != 0) {
-            Err(e) => eprintln!("Run error: {}", e),
+            Err(e) => error!("Run error: {}", e),
             Ok(_) => (),
         },
         Target::Init { name } => {
             match init(name) {
-                Err(e) => eprintln!("Init error: {}", e),
-                Ok(_) => println!("Initialized project directory"),
+                Err(e) => error!("Init error: {}", e),
+                Ok(_) => info!("Initialized project directory"),
             };
         }
     };
@@ -54,7 +69,7 @@ fn main() {
 
 fn build(jar: bool) -> Result<PostBuildData> {
     use std::process::Command;
-
+    info!("Starting build...");
     let cfg = maintenance::get_config()?;
     let mut lockfile = maintenance::get_lock_file()?;
     let mut output = Command::new(&cfg.package.compiler);
@@ -64,6 +79,7 @@ fn build(jar: bool) -> Result<PostBuildData> {
     let mut bin_dir = working_dir.clone();
     bin_dir.push("bin");
     //gather external libs
+    trace!("{} external libraries", "Gathering".green().bold());
     let mut external_libs: Vec<PathBuf> = vec![];
     if let Some(import) = &cfg.import {
         for ext_lib in import {
@@ -77,6 +93,7 @@ fn build(jar: bool) -> Result<PostBuildData> {
     }
 
     //gather libs
+    trace!("{} included libraries", "Gathering".green().bold());
     let mut lib_dir = working_dir.clone();
     lib_dir.push("lib");
     let libs = maintenance::get_sources(&lib_dir, "jar")?
@@ -89,19 +106,23 @@ fn build(jar: bool) -> Result<PostBuildData> {
     output.arg("-classpath");
     let mut libs_arg = String::new();
     for lib in &libs {
+        trace!("\t{} {:?}", "Including".blue().bold(), lib);
+
         #[cfg(target_os = "windows")]
         libs_arg.push_str(&format!("lib/{};", lib.to_str().unwrap()));
         #[cfg(target_os = "linux")]
         libs_arg.push_str(&format!("lib/{}:", lib.to_str().unwrap()));
     }
     for ext_lib in &external_libs {
+        trace!("\t{} {:?}", "Including".blue().bold(), ext_lib);
+
         #[cfg(target_os = "windows")]
         libs_arg.push_str(&format!("{};", ext_lib.to_str().unwrap()));
         #[cfg(target_os = "linux")]
         libs_arg.push_str(&format!("{}:", ext_lib.to_str().unwrap()));
     }
 
-    //println!("lib_arg: {}", &libs_arg);
+    debug!("lib_arg: {}", &libs_arg);
     output.arg(&libs_arg);
 
     //pass -d flag
@@ -109,12 +130,10 @@ fn build(jar: bool) -> Result<PostBuildData> {
     output.arg("bin");
 
     //gather sources
+    trace!("{} source files", "Gathering".green().bold());
     src_dir.push("src");
     let sources = maintenance::get_sources(&src_dir, "java")?;
-    let sources = sources
-        .into_iter()
-        .map(|d| d.path())
-        .collect::<Vec<_>>();
+    let sources = sources.into_iter().map(|d| d.path()).collect::<Vec<_>>();
 
     let mut source_count = 0;
     //pass recently modified sources
@@ -141,15 +160,22 @@ fn build(jar: bool) -> Result<PostBuildData> {
         }
     }) {
         let source_arg = format!("{}", src.to_str().unwrap());
-        //println!("adding source:`{}`", &source_arg);
+        trace!("\t{} `{}`","Adding".green().bold(), &source_arg);
         output.arg(source_arg);
         source_count += 1;
     }
     //run build
+    info!("Running build...");
     if source_count > 0 {
         let _output = output.output()?;
+        if !_output.status.success(){
+            std::io::stderr().write_all(&_output.stderr)?;
+            return Err(Box::new(BuildError { msg: "Compilation failed".into() }))
+        }
         std::io::stdout().write_all(&_output.stdout)?;
-        std::io::stderr().write_all(&_output.stderr)?;
+        info!("Compilation success");
+    } else {
+        info!("No need for compilation, all files up to date");
     }
 
     //gather class files
@@ -162,7 +188,7 @@ fn build(jar: bool) -> Result<PostBuildData> {
         .collect::<Vec<PathBuf>>();
 
     maintenance::purge_unused_classes(classes.clone())?;
-    
+
     let old_lock = lockfile.clone();
     lockfile.last_build = Some(std::time::SystemTime::now());
     maintenance::create_lock_file(&lockfile)?;
@@ -178,23 +204,21 @@ fn build(jar: bool) -> Result<PostBuildData> {
         external_libs: external_libs,
         current_lock: lockfile,
     };
+    //make jar
     if jar {
         package_jar(&post_build.cfg, &post_build, old_lock)?;
     }
-
-    //make jar
-
     Ok(post_build)
 }
 
 fn package_jar(
-    cfg: &ConfigFile, 
-    post_build: &PostBuildData, 
-    lock: config::NopainLock) -> Result<()> 
-{
+    cfg: &ConfigFile,
+    post_build: &PostBuildData,
+    lock: config::NopainLock,
+) -> Result<()> {
     use std::fs;
     use std::process::Command;
-
+    info!("Starting jar action...");
     let package = cfg.package.name.as_str();
     let mut output = Command::new(&cfg.package.jar);
 
@@ -215,7 +239,13 @@ fn package_jar(
     output.arg("bin");
     output.arg(".");
 
+    info!("Making jar");
     let out = output.output()?;
+
+    if !out.status.success() {
+        std::io::stderr().write_all(&out.stderr)?;
+        return Err(Box::new(erros::JarError{ msg: "Failed to make the jar file".into() }));
+    }
 
     build_dir.push("lib");
     let build_lib_dir = build_dir;
@@ -223,9 +253,10 @@ fn package_jar(
         .recursive(true)
         .create(&build_lib_dir)?;
 
-
     //copy libs from /lib to /target/build/lib
-    for lib in post_build.libs
+    trace!("{} included libraries to target/build/lib", "Copying".yellow().bold());
+    for lib in post_build
+        .libs
         .iter()
         .map(|l| post_build.lib_dir.join(l).to_owned())
     {
@@ -242,7 +273,8 @@ fn package_jar(
             }
         }
     }
-
+    trace!("{} external libraries to target/build/lib", "Copying".yellow().bold());
+    
     for ext in post_build.external_libs.iter() {
         let dest = build_lib_dir.join(ext.file_name().unwrap());
         let meta = ext.metadata()?;
@@ -257,9 +289,7 @@ fn package_jar(
             }
         }
     }
-
     std::io::stdout().write_all(&out.stdout)?;
-    std::io::stderr().write_all(&out.stderr)?;
     Ok(())
 }
 
@@ -368,9 +398,11 @@ fn generate_manifest(
     libs: &Vec<PathBuf>,
     external_libs: &Vec<PathBuf>,
 ) -> Result<PathBuf> {
+    info!("Generating manifest file at `target/Manifest.txt`");
     use std::fs;
     let path = PathBuf::from("target/Manifest.txt");
     let mut manifest = fs::File::create(&path)?;
+    trace!("{} to manifest file", "Writing".green().bold());
 
     write!(manifest, "Manifest-Version: 1.0\n")?;
     if let Some(entry) = &cfg.package.main {
@@ -388,9 +420,9 @@ fn generate_manifest(
         )?;
     }
     write!(manifest, "\n\n")?;
+    trace!("{} manifest generation", "Finished".yellow().bold());
     Ok(path)
 }
-
 
 struct PostBuildData {
     /// all .jar file paths used for compilation
