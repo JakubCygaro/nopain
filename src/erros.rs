@@ -1,16 +1,17 @@
 use std::path::PathBuf;
 
-
 #[derive(Clone, Debug)]
 pub struct ImportValidationError {
-    pub path: PathBuf
+    pub path: PathBuf,
 }
-impl std::error::Error for ImportValidationError {
-
-}
+impl std::error::Error for ImportValidationError {}
 impl std::fmt::Display for ImportValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "the path `{:?}` is not a valid .jar file path", self.path)
+        write!(
+            f,
+            "the path `{:?}` is not a valid .jar file path",
+            self.path
+        )
     }
 }
 
