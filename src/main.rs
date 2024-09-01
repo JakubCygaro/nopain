@@ -61,7 +61,7 @@ fn build(jar: bool) -> Result<PostBuildData> {
     use std::process::Command;
 
     let cfg = maintenance::get_config()?;
-    let lockfile = maintenance::get_lock_file()?;
+    let mut lockfile = maintenance::get_lock_file()?;
     let mut output = Command::new(&cfg.package.compiler);
 
     let working_dir = std::env::current_dir()?;
@@ -72,7 +72,7 @@ fn build(jar: bool) -> Result<PostBuildData> {
     if let Some(import) = &cfg.import {
         for ext_lib in import {
             let path = PathBuf::from(&ext_lib.path);
-            let path = path.canonicalize()?;
+            // let path = path.canonicalize()?;
             if path.extension().unwrap_or_default() != "jar" {
                 return Err(Box::new(ImportValidationError{path: path}))
             }
@@ -107,6 +107,7 @@ fn build(jar: bool) -> Result<PostBuildData> {
 
     //println!("lib_arg: {}", &libs_arg);
     output.arg(&libs_arg);
+
     //pass -d flag
     output.arg("-d");
     output.arg("bin");
@@ -134,10 +135,15 @@ fn build(jar: bool) -> Result<PostBuildData> {
             }
         })
         .enumerate() {
-        output.arg(format!("{}", src.to_str().unwrap()));
+        let source_arg = format!("{}", src.to_str().unwrap());
+        //println!("adding source:`{}`", &source_arg);
+        output.arg(source_arg);
     }
     //run build
     let _output = output.output()?;
+    
+    std::io::stdout().write_all(&_output.stdout)?;
+    std::io::stderr().write_all(&_output.stderr)?;
 
     //gather class files
     let classes = sources
@@ -149,6 +155,10 @@ fn build(jar: bool) -> Result<PostBuildData> {
         .collect::<Vec<PathBuf>>();
     let mut bin_dir = working_dir.clone();
     bin_dir.push("bin");
+
+    lockfile.last_build = Some(std::time::SystemTime::now());
+    maintenance::create_lock_file(&lockfile)?;
+
     let post_build = PostBuildData {
         cfg: cfg,
         libs: libs,
@@ -157,7 +167,8 @@ fn build(jar: bool) -> Result<PostBuildData> {
         lib_dir: lib_dir,
         libs_arg: libs_arg,
         bin_dir: bin_dir,
-        external_libs: external_libs
+        external_libs: external_libs,
+        current_lock: lockfile
     };
     if jar {
         jar_package(&post_build.cfg, &post_build)?;
@@ -206,6 +217,7 @@ fn jar_package(cfg: &ConfigFile, post_build: &PostBuildData) -> Result<()> {
         .map(|l| {
             post_build.lib_dir.join(l).to_owned()
         })
+        
     {
         let dest = build_lib_dir.join(lib.file_name().unwrap());
         fs::copy(&lib, dest)?;
@@ -356,7 +368,8 @@ struct PostBuildData {
     pub bin_dir: PathBuf,
     pub src_dir: PathBuf,
     pub lib_dir: PathBuf,
-    pub external_libs: Vec<PathBuf>
+    pub external_libs: Vec<PathBuf>,
+    pub current_lock: config::NopainLock,
 }
 
 

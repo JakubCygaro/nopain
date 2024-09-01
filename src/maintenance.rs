@@ -1,7 +1,8 @@
 use super::{Result, config};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::fs::DirEntry;
+
 pub fn get_config() -> Result<config::ConfigFile> {
     use std::fs;
     let file = fs::read_to_string("./Nopain.toml")?;
@@ -48,4 +49,13 @@ pub fn get_sources(path: &PathBuf, ext: &str) -> Result<Vec<DirEntry>> {
         }
     }
     Ok(ret)
+}
+
+pub fn create_lock_file(lockfile: &config::NopainLock) -> Result<()>{
+    use std::fs;
+
+    let mut f = fs::File::create("Nopain.lock")?;
+    let toml = toml::to_string(lockfile)?;
+    writeln!(f, "{}", toml)?;
+    Ok(())
 }
