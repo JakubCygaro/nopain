@@ -112,6 +112,7 @@ fn build(jar: bool, release: Option<i32>) -> Result<PostBuildData> {
     //pass libs as arg
     output.arg("-classpath");
     let mut libs_arg = String::new();
+    libs_arg.push_str("bin;");
     for lib in &libs {
         trace!("\t{} {:?}", "Including".blue().bold(), lib);
 
@@ -152,36 +153,33 @@ fn build(jar: bool, release: Option<i32>) -> Result<PostBuildData> {
     let mut source_count = 0;
     //pass recently modified sources
     for src in sources.iter()
-    // The java compiler is the most retarded piece of work I've seen in a long time
+        .filter(|d| {
+        let Some(last_build) = &lockfile.last_build else {
+            return true;
+        };
 
-    //     .filter(|d| {
-    //     return true;
-    //     let Some(last_build) = &lockfile.last_build else {
-    //         return true;
-    //     };
+        if let Some(_) = release {
+            return true;
+        }
 
-    //     if let Some(_) = release {
-    //         return true;
-    //     }
+        //check if the corresponding .class file already exists
+        let p = d.to_owned().clone();
+        let p = p.strip_prefix(&src_dir).unwrap().to_owned();
+        let mut p = bin_dir.join(p);
+        p.set_extension("class");
+        if let Ok(false) = p.try_exists() {
+            debug!("`{:?}` does not exist", p);
+            return true;
+        }
 
-    //     //check if the corresponding .class file already exists
-    //     let p = d.to_owned().clone();
-    //     let p = p.strip_prefix(&src_dir).unwrap().to_owned();
-    //     let mut p = bin_dir.join(p);
-    //     p.set_extension("class");
-    //     if let Ok(false) = p.try_exists() {
-    //         debug!("`{:?}` does not exist", p);
-    //         return true;
-    //     }
-
-    //     match d.metadata() {
-    //         Err(_) => false,
-    //         Ok(m) => {
-    //             let m = m.modified().unwrap();
-    //             m.ge(last_build)
-    //         }
-    //     }
-    // }) 
+        match d.metadata() {
+            Err(_) => false,
+            Ok(m) => {
+                let m = m.modified().unwrap();
+                m.ge(last_build)
+            }
+        }
+    }) 
     {
         let source_arg = format!("{}", src.to_str().unwrap());
         trace!("\t{} `{}`","Adding".green().bold(), &source_arg);
