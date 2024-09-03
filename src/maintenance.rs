@@ -30,7 +30,7 @@ pub fn get_lock_file() -> Result<config::NopainLock> {
         }
     } else {
         trace!("{} new Nopain.lock file ", "Creating".green().bold());
-        Ok(config::NopainLock { last_build: None })
+        Ok(config::NopainLock::default())
     }
 }
 

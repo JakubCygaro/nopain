@@ -25,3 +25,11 @@ pub struct Package {
 pub struct NopainLock {
     pub last_build: Option<std::time::SystemTime>,
 }
+
+impl Default for NopainLock {
+    fn default() -> Self {
+        Self {
+            last_build: None
+        }
+    }
+}

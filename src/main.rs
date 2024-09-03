@@ -23,12 +23,16 @@ struct Args {
 #[derive(Subcommand, Clone)]
 enum Target {
     Build {
-        #[arg(long, required = false, num_args = 0, default_value = None, action = clap::ArgAction::Count)]
-        jar: u8,
+        #[arg(short, long, required = false, num_args = 0, default_value = None)]
+        jar: bool,
+        #[arg(short, long, required = false, num_args = 1, default_value = None)]
+        release: Option<i32>
     },
     Run {
-        #[arg(long, required = false, num_args = 0, default_value = None, action = clap::ArgAction::Count)]
-        jar: u8,
+        #[arg(short, long, required = false, num_args = 0, default_value = None)]
+        jar: bool,
+        #[arg(short, long, required = false, num_args = 1, default_value = None)]
+        release: Option<i32>
     },
     Init {
         name: String,
@@ -50,11 +54,11 @@ fn main() {
         .init();
 
     match args.target {
-        Target::Build { jar } => match build(jar != 0) {
+        Target::Build { jar, release } => match build(jar, release) {
             Err(e) => error!("Build error: {}", e),
             Ok(_) => info!("Build done"),
         },
-        Target::Run { jar } => match run(jar != 0) {
+        Target::Run { jar, release } => match run(jar, release) {
             Err(e) => error!("Run error: {}", e),
             Ok(_) => (),
         },
@@ -67,9 +71,12 @@ fn main() {
     };
 }
 
-fn build(jar: bool) -> Result<PostBuildData> {
+fn build(jar: bool, release: Option<i32>) -> Result<PostBuildData> {
     use std::process::Command;
     info!("Starting build...");
+    if let Some(release) = release {
+        info!("Building for release {}", release);
+    }
     let cfg = maintenance::get_config()?;
     let mut lockfile = maintenance::get_lock_file()?;
     let mut output = Command::new(&cfg.package.compiler);
@@ -125,9 +132,16 @@ fn build(jar: bool) -> Result<PostBuildData> {
     debug!("lib_arg: {}", &libs_arg);
     output.arg(&libs_arg);
 
+    //add the --release flag
+    if let Some(release) = release {
+        output.arg("--release");
+        output.arg(&format!("{}", release));
+    }
+
     //pass -d flag
     output.arg("-d");
     output.arg("bin");
+
 
     //gather sources
     trace!("{} source files", "Gathering".green().bold());
@@ -141,6 +155,10 @@ fn build(jar: bool) -> Result<PostBuildData> {
         let Some(last_build) = &lockfile.last_build else {
             return true;
         };
+
+        if let Some(_) = release {
+            return true;
+        }
 
         //check if the corresponding .class file already exists
         let p = d.to_owned().clone();
@@ -293,10 +311,10 @@ fn package_jar(
     Ok(())
 }
 
-fn run(jar: bool) -> Result<()> {
+fn run(jar: bool, release: Option<i32>) -> Result<()> {
     use std::process::Command;
 
-    let build_data = build(jar)?;
+    let build_data = build(jar, release)?;
     let cfg = build_data.cfg;
     let Some(main) = &cfg.package.main else {
         return Err(Box::new(BuildError {
