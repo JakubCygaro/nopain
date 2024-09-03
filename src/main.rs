@@ -136,7 +136,7 @@ fn build(jar: bool, release: Option<i32>) -> Result<PostBuildData> {
         libs_arg.push_str(&format!("{}:", ext_lib.to_str().unwrap()));
     }
 
-    debug!("lib_arg: {}", &libs_arg);
+    trace!("Compiling with classpath: `{}`", &libs_arg);
     output.arg(&libs_arg);
 
     //add the --release flag
