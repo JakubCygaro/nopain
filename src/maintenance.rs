@@ -74,10 +74,7 @@ pub fn purge_unused_classes(package_classes: Vec<PathBuf>) -> Result<()> {
         .map(|d| d.path())
         .map(|p| p.strip_prefix(&bin_path).unwrap().to_owned())
         .collect::<Vec<_>>();
-    if bin.is_empty() {
-        trace!("No files to {}", "purge".red().bold());
-        return Ok(());
-    }
+    
 
     for class_file in &bin {
         if package_classes.contains(class_file) {
@@ -87,5 +84,6 @@ pub fn purge_unused_classes(package_classes: Vec<PathBuf>) -> Result<()> {
         trace!("{} file `{:?}`", "Purging".red().bold(), to_remove);
         fs::remove_file(to_remove)?;
     }
+    trace!("{} done", "purge".red().bold());
     Ok(())
 }
