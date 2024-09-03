@@ -112,7 +112,13 @@ fn build(jar: bool, release: Option<i32>) -> Result<PostBuildData> {
     //pass libs as arg
     output.arg("-classpath");
     let mut libs_arg = String::new();
+
+    #[cfg(target_os = "windows")]
     libs_arg.push_str("bin;");
+    #[cfg(target_os = "linux")]
+    libs_arg.push_str("bin:");
+
+
     for lib in &libs {
         trace!("\t{} {:?}", "Including".blue().bold(), lib);
 
