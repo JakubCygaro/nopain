@@ -174,7 +174,6 @@ fn build(jar: bool, release: Option<i32>) -> Result<PostBuildData> {
         let mut p = bin_dir.join(p);
         p.set_extension("class");
         if let Ok(false) = p.try_exists() {
-            debug!("`{:?}` does not exist", p);
             return true;
         }
 
