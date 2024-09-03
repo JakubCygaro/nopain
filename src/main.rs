@@ -153,7 +153,7 @@ fn build(jar: bool, release: Option<i32>) -> Result<PostBuildData> {
     //pass recently modified sources
     for src in sources.iter()
     // The java compiler is the most retarded piece of work I've seen in a long time
-    
+
     //     .filter(|d| {
     //     return true;
     //     let Some(last_build) = &lockfile.last_build else {
@@ -346,11 +346,10 @@ fn run(jar: bool, release: Option<i32>) -> Result<()> {
     } else {
         output.arg(main.as_str());
     }
+    let _output = output.spawn()?;
 
-    let _output = output.output()?;
-
-    std::io::stdout().write_all(&_output.stdout)?;
-    std::io::stderr().write_all(&_output.stderr)?;
+    // std::io::stdout().write_all(&_output.stdout)?;
+    // std::io::stderr().write_all(&_output.stderr)?;
 
     Ok(())
 }
