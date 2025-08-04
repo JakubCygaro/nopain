@@ -341,7 +341,10 @@ fn run(jar: bool, release: Option<i32>) -> Result<()> {
 
     // pass -cp flag
     output.arg("-classpath");
+    #[cfg(target_os = "windows")]
     output.arg(format!("bin;{}", &build_data.libs_arg));
+    #[cfg(target_os = "linux")]
+    output.arg(format!("bin:{}", &build_data.libs_arg));
 
     if jar {
         output.arg("-jar");
